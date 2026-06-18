@@ -38,7 +38,7 @@ class TestIsolatedOutliers:
         scores = detector.score_samples(X)
         
         # Outliers should have higher scores than normal points
-        assert scores[n_normal:].mean() > scores[:n_normal].mean()
+        assert scores[n_normal:].mean() < scores[:n_normal].mean()
         
         # Predict with true contamination rate
         contamination = n_outliers / len(X)
@@ -48,7 +48,7 @@ class TestIsolatedOutliers:
         true_outliers_detected = np.sum(predictions[n_normal:] == -1)
         assert true_outliers_detected >= n_outliers * 0.8  # At least 80%
     
-    def test_outliers_get_top_scores(self):
+    def test_outliers_get_bottom_scores(self):
         """Test that outliers get the highest scores."""
         np.random.seed(42)
         n_normal = 100
@@ -68,7 +68,7 @@ class TestIsolatedOutliers:
         scores = detector.fit(X).score_samples(X)
         
         # Top 5 scores should all be outliers
-        top_5_indices = np.argsort(scores)[-5:]
+        top_5_indices = np.argsort(scores)[:5]
         assert all(idx >= n_normal for idx in top_5_indices)
 
 
@@ -95,8 +95,8 @@ class TestHighDimensional:
         detector.fit(X)
         scores = detector.score_samples(X)
         
-        # Outliers should still have higher scores
-        assert scores[n_samples - n_outliers:].mean() > scores[:n_samples - n_outliers].mean()
+        # Outliers should still have lower scores
+        assert scores[n_samples - n_outliers:].mean() < scores[:n_samples - n_outliers].mean()
     
     def test_very_high_dimensional(self):
         """Test with very high dimensions (500D)."""
@@ -139,21 +139,21 @@ class TestKernelFunctions:
         X, n_normal = outlier_data
         detector = RankOD(n_neighbors=10, max_rank=30, kernel='harmonic', random_state=42)
         scores = detector.fit(X).score_samples(X)
-        assert scores[n_normal:].mean() > scores[:n_normal].mean()
+        assert scores[n_normal:].mean() < scores[:n_normal].mean()
     
     def test_inverse_sqrt_kernel(self, outlier_data):
         """Test inverse sqrt kernel."""
         X, n_normal = outlier_data
         detector = RankOD(n_neighbors=10, max_rank=30, kernel='inverse_sqrt', random_state=42)
         scores = detector.fit(X).score_samples(X)
-        assert scores[n_normal:].mean() > scores[:n_normal].mean()
+        assert scores[n_normal:].mean() < scores[:n_normal].mean()
     
     def test_gaussian_kernel(self, outlier_data):
         """Test Gaussian kernel."""
         X, n_normal = outlier_data
         detector = RankOD(n_neighbors=10, max_rank=30, kernel='gaussian', kernel_params={'sigma': 2.0}, random_state=42)
         scores = detector.fit(X).score_samples(X)
-        assert scores[n_normal:].mean() > scores[:n_normal].mean()
+        assert scores[n_normal:].mean() < scores[:n_normal].mean()
     
     def test_custom_kernel(self, outlier_data):
         """Test custom kernel function."""
@@ -164,7 +164,7 @@ class TestKernelFunctions:
         
         detector = RankOD(n_neighbors=10, max_rank=30, kernel=custom_kernel, random_state=42)
         scores = detector.fit(X).score_samples(X)
-        assert scores[n_normal:].mean() > scores[:n_normal].mean()
+        assert scores[n_normal:].mean() < scores[:n_normal].mean()
 
 
 class TestParameters:
