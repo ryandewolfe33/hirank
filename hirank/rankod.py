@@ -162,6 +162,9 @@ class RankOD(OutlierMixin, BaseEstimator):
         Expected proportion of outliers in the dataset.
         Used to set the threshold for binary classification in predict().
         Must be in the range (0, 0.5].
+    
+    reverse_scores : bool, default=False
+        Flag to reverse the scores so that higher scores are more likely to be outliers.
 
     precompute_neighbors : bool, default=False
         Whether to pre-compute and store max_rank nearest neighbors for all training points.
@@ -233,6 +236,7 @@ class RankOD(OutlierMixin, BaseEstimator):
         n_neighbors: int = 15,
         max_rank: int = 100,
         contamination: float = 0.1,
+        reverse_scores: bool = False,
         precompute_neighbors: bool = False,
         dtype=np.float64,
         kernel: Union[str, Callable] = "harmonic",
@@ -246,6 +250,7 @@ class RankOD(OutlierMixin, BaseEstimator):
         self.n_neighbors = n_neighbors
         self.max_rank = max_rank
         self.contamination = contamination
+        self.reverse_scores = reverse_scores
         self.precompute_neighbors = precompute_neighbors
         self.dtype = dtype  # Store as-is for sklearn compatibility
         self.kernel = kernel
@@ -272,7 +277,7 @@ class RankOD(OutlierMixin, BaseEstimator):
                 f"Unknown kernel: {self.kernel}. "
                 f"Must be 'harmonic', 'inverse_sqrt', 'gaussian', or callable."
             )
-
+    
     def fit(self, X, y=None):
         """
         Fit the RankOD detector on training data.
@@ -345,7 +350,7 @@ class RankOD(OutlierMixin, BaseEstimator):
         # sklearn default is inlier scores
         self.outlier_scores_ = self._compute_scores(X, is_training=True)
         # Save offset
-        self.offset_ = np.percentile(self.outlier_scores_, 100 * self.contamination)
+        self.offset_ = self._compute_offset(self.outlier_scores_)
 
         return self
 
@@ -414,6 +419,9 @@ class RankOD(OutlierMixin, BaseEstimator):
             self.max_raw_score_ - self.min_raw_score_
         )
 
+        if self.reverse_scores:
+            outlier_scores = 1 - outlier_scores
+
         return outlier_scores
 
     def score_samples(self, X):
@@ -468,7 +476,7 @@ class RankOD(OutlierMixin, BaseEstimator):
         check_is_fitted(self, ["offset_", "index_", "n_features_in_"])
         scores = self.score_samples(X)
         if contamination is not None:
-            offset = np.percentile(scores, 100 * contamination)
+            offset = self._compute_offset(scores, contamination=contamination)
         else:
             offset = self.offset_
         translated_scores = scores - offset
@@ -520,3 +528,12 @@ class RankOD(OutlierMixin, BaseEstimator):
         prediction = np.full_like(self.outlier_scores_, 1, dtype="int")
         prediction[self.outlier_scores_ <= self.offset_] = -1
         return prediction
+
+    def _compute_offset(self, scores, contamination=None) -> float:
+        """Get the decision threshold"""
+        if contamination is None:
+            contamination = self.contamination
+        percentile_threshold = (1 - contamination) if self.reverse_scores else contamination
+        percentile_threshold *= 100
+        offset = np.percentile(scores, percentile_threshold)
+        return offset
