@@ -12,7 +12,7 @@ from numba import njit, prange, from_dtype
 from numba.typed import Dict
 from pynndescent import NNDescent
 from sklearn.base import BaseEstimator, OutlierMixin
-from sklearn.utils.validation import check_array, check_is_fitted
+from sklearn.utils.validation import validate_data, check_is_fitted
 
 
 @njit(cache=True)
@@ -104,12 +104,9 @@ def compute_reverse_ranks(
     np.ndarray
         Reverse ranks
     """
-    # Compute density scores
-    n_samples = nn_indices.shape[0]
-    n_neighbors = nn_indices.shape[1]
     reverse_ranks = np.empty_like(nn_indices)
-    for i in prange(n_samples):
-        for j in prange(n_neighbors):
+    for i in prange(nn_indices.shape[0]):
+        for j in prange(nn_indices.shape[1]):
             neighbor = nn_indices[i, j]
             dist = nn_distances[i, j]
             if row_map is None:
@@ -123,7 +120,7 @@ def compute_reverse_ranks(
     return reverse_ranks
 
 
-class RankOD(BaseEstimator, OutlierMixin):
+class RankOD(OutlierMixin, BaseEstimator):
     """
     Rank-based Outlier Detection using Reverse k-NN Density Estimation.
 
@@ -239,9 +236,9 @@ class RankOD(BaseEstimator, OutlierMixin):
         precompute_neighbors: bool = False,
         dtype=np.float64,
         kernel: Union[str, Callable] = "harmonic",
-        kernel_params: Optional[dict] = None,
+        kernel_params: Optional[dict] = {},
         metric: str = "euclidean",
-        metric_kwds: Optional[dict] = None,
+        metric_kwds: Optional[dict] = {},
         n_jobs: int = -1,
         random_state: Optional[int] = None,
         verbose: bool = False,
@@ -252,9 +249,9 @@ class RankOD(BaseEstimator, OutlierMixin):
         self.precompute_neighbors = precompute_neighbors
         self.dtype = dtype  # Store as-is for sklearn compatibility
         self.kernel = kernel
-        self.kernel_params = kernel_params or {}
+        self.kernel_params = kernel_params
         self.metric = metric
-        self.metric_kwds = metric_kwds or {}
+        self.metric_kwds = metric_kwds
         self.n_jobs = n_jobs
         self.random_state = random_state
         self.verbose = verbose
@@ -293,15 +290,13 @@ class RankOD(BaseEstimator, OutlierMixin):
         self : object
             Fitted estimator.
         """
-        X = check_array(X, accept_sparse=False, dtype=self.dtype)
+        X = validate_data(self, X, accept_sparse=False, dtype=self.dtype, reset=True)
         n_samples, n_features = X.shape
 
         if self.n_neighbors >= n_samples:
             raise ValueError(
                 f"n_neighbors={self.n_neighbors} must be less than n_samples={n_samples}"
             )
-
-        self.n_features_in_ = n_features
 
         # Build nearest neighbor index
         if self.verbose:
@@ -315,7 +310,9 @@ class RankOD(BaseEstimator, OutlierMixin):
             metric_kwds=self.metric_kwds,
             n_neighbors=max(
                 self.n_neighbors + 1, self.max_rank + 1
-            ),  # +1 to exclude self   #TODO by taking max are we always storing up to max rank neighbors in the index? Does this defeat the precompute option
+            ),  # +1 to exclude self
+            #TODO by taking max are we always storing up to max rank neighbors in the index?
+            # Does this defeat the precompute option
             n_jobs=self.n_jobs,
             random_state=self.random_state,
             verbose=self.verbose,
@@ -337,7 +334,7 @@ class RankOD(BaseEstimator, OutlierMixin):
 
         # Store training data for on-demand queries (necessary even though PyNNDescent has _raw_data
         # because it may internally transform the data, causing different query results)
-        self._training_data_ = X  # Already checked to be correct dtype by check_array
+        self._training_data_ = X  # Already checked to be correct dtype by validate_data
         # Store training data size for later reference
         self._n_training_samples_ = n_samples
 
@@ -345,7 +342,10 @@ class RankOD(BaseEstimator, OutlierMixin):
         if self.verbose:
             print("Computing outlier scores...")
 
+        # sklearn default is inlier scores
         self.outlier_scores_ = self._compute_scores(X, is_training=True)
+        # Save offset
+        self.offset_ = np.percentile(self.outlier_scores_, 100 * self.contamination)
 
         return self
 
@@ -363,7 +363,7 @@ class RankOD(BaseEstimator, OutlierMixin):
         Returns
         -------
         np.ndarray of shape (n_samples,)
-            Outlier scores (higher = more outlier).
+            Outlier scores (lower = more outlier).
         """
         n_samples = X.shape[0]
         kernel_func = self._get_kernel_function()
@@ -396,30 +396,22 @@ class RankOD(BaseEstimator, OutlierMixin):
             )
             neighbor_nn_distances = neighbor_nn_distances[:, 1:]  # Exclude self
 
-        print("Is precomputed", self.precompute_neighbors, "Is training", is_training)
-        print(neighbor_nn_distances.shape)
-
         reverse_ranks = compute_reverse_ranks(
             knn_indices, knn_distances, neighbor_nn_distances, row_map=row_map
         )
 
+        # TODO factor out and implement more methods
         kernel_values = kernel_func(reverse_ranks)
-        density_scores = np.sum(kernel_values, axis=1)
+        raw_scores = np.sum(kernel_values, axis=1)
 
-        # Store density scores and compute density bounds
-        if is_training:
-            self.density_scores_ = density_scores
-
-        # Calculate min and max density for normalization
-        self.max_density_ = self.n_neighbors * kernel_func(np.array([1.0]))[0]
-        self.min_density_ = (
-            self.n_neighbors * kernel_func(np.array([float(self.max_rank)]))[0]
-        )
-
-        # Convert to outlier scores: higher density = lower outlier score
         # Normalize to [0, 1] range for interpretability
-        outlier_scores = (self.max_density_ - density_scores) / (
-            self.max_density_ - self.min_density_
+        if is_training:
+            self.max_raw_score_ = self.n_neighbors * kernel_func(np.array([1.0]))[0]
+            self.min_raw_score_ = (
+                self.n_neighbors * kernel_func(np.array([float(self.max_rank)]))[0]
+            )
+        outlier_scores = (raw_scores - self.min_raw_score_) / (
+            self.max_raw_score_ - self.min_raw_score_
         )
 
         return outlier_scores
@@ -428,7 +420,7 @@ class RankOD(BaseEstimator, OutlierMixin):
         """
         Compute outlier scores for samples.
 
-        Higher scores indicate more likely outliers.
+        Smaller scores indicate more likely outliers.
 
         **Note on scoring new samples:**
         For new test samples not in the training set, RankOD computes reverse ranks
@@ -445,24 +437,16 @@ class RankOD(BaseEstimator, OutlierMixin):
         Returns
         -------
         np.ndarray of shape (n_samples,)
-            Outlier scores for samples, normalized to [0, 1] range.
-            Higher scores indicate outliers (0=most normal, 1=most anomalous).
+            Outlier scores for samples. Higher scores indicate outliers (0=most anomalous, 1=most normal).
         """
         check_is_fitted(self, ["index_", "n_features_in_"])
-
         # Handle single sample (1D array)
         X = np.asarray(X)
         if X.ndim == 1:
             X = X.reshape(1, -1)
+        X = validate_data(self, X, accept_sparse=False, dtype=self.dtype, reset=False)
 
-        X = check_array(X, accept_sparse=False, dtype=self.dtype)
-
-        if X.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"X has {X.shape[1]} features, "
-                f"but RankOD was fitted with {self.n_features_in_} features."
-            )
-
+        # TODO check this works, add flag to override and recompute
         # Check if this is the training data (quick heuristic)
         if hasattr(self, "outlier_scores_") and X.shape[0] == len(self.outlier_scores_):
             # Try to detect if this is training data by checking first few points
@@ -472,7 +456,23 @@ class RankOD(BaseEstimator, OutlierMixin):
                 return self.outlier_scores_
 
         # For new test data, compute using proper reverse k-NN with distance comparisons
-        return self._compute_scores(X, is_training=False)
+        outlier_scores = self._compute_scores(X, is_training=False)
+        return outlier_scores
+
+    def decision_function(self, X, contamination: Optional[float] = None):
+        """
+        Returns a shifted copy of the scores such that non-positive scores are outliers.
+        """
+        # TODO implement other options (possibly using a learned global threshold) to
+        # rescale scores so negatives are outliers
+        check_is_fitted(self, ["offset_", "index_", "n_features_in_"])
+        scores = self.score_samples(X)
+        if contamination is not None:
+            offset = np.percentile(scores, 100 * contamination)
+        else:
+            offset = self.offset_
+        translated_scores = scores - offset
+        return translated_scores
 
     def predict(self, X, contamination: Optional[float] = None):
         """
@@ -494,19 +494,12 @@ class RankOD(BaseEstimator, OutlierMixin):
         np.ndarray of shape (n_samples,)
             Predicted labels: -1 for outliers, 1 for inliers.
         """
-        if contamination is None:
-            contamination = self.contamination
-
-        scores = self.score_samples(X)
-        threshold = np.percentile(scores, 100 * (1 - contamination))
-
-        # Higher scores are outliers
-        predictions = np.ones(len(scores), dtype=int)
-        predictions[scores >= threshold] = -1
-
+        decision_scores = self.decision_function(X, contamination=contamination)
+        predictions = np.full_like(decision_scores, 1, dtype="int")
+        predictions[decision_scores <= 0] = -1
         return predictions
 
-    def fit_predict(self, X, y=None, contamination: Optional[float] = None):
+    def fit_predict(self, X, y=None):
         """
         Fit the detector and predict outliers on training data.
 
@@ -518,14 +511,12 @@ class RankOD(BaseEstimator, OutlierMixin):
         y : Ignored
             Not used, present for sklearn compatibility.
 
-        contamination : float, optional
-            Expected proportion of outliers in the dataset.
-            If None, uses the contamination value set during initialization.
-            Must be in the range (0, 0.5].
-
         Returns
         -------
         np.ndarray of shape (n_samples,)
             Predicted labels: -1 for outliers, 1 for inliers.
         """
-        return self.fit(X, y).predict(X, contamination=contamination)
+        self.fit(X)
+        prediction = np.full_like(self.outlier_scores_, 1, dtype="int")
+        prediction[self.outlier_scores_ <= self.offset_] = -1
+        return prediction

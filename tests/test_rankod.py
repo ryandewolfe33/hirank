@@ -73,7 +73,7 @@ def test_fit_predict():
     X = np.random.randn(100, 10)
     detector = RankOD(n_neighbors=10, max_rank=50)
 
-    labels = detector.fit_predict(X, contamination=0.1)
+    labels = detector.fit_predict(X)
     assert len(labels) == 100
     assert set(labels).issubset({-1, 1})
 
@@ -157,10 +157,10 @@ def test_outlier_detection():
     detector.fit(X)
     scores = detector.score_samples(X)
 
-    # Outliers should have higher scores
-    outlier_scores = scores[-5:]
-    normal_scores = scores[:95]
-    assert np.mean(outlier_scores) > np.mean(normal_scores)
+    # Outliers should have lower scores
+    outlier_scores = scores[:5]
+    normal_scores = scores[5:]
+    assert np.mean(outlier_scores) < np.mean(normal_scores)
 
 
 def test_single_vector_scoring():
@@ -225,7 +225,7 @@ def test_single_vector_wrong_dimensions():
     detector.fit(X_train)
     
     # Wrong number of features (should raise ValueError)
-    wrong_vector = np.random.randn(5)  # Only 5 features instead of 10
+    wrong_vector = np.random.randn(1, 5)  # Only 5 features instead of 10
     
     with pytest.raises(ValueError, match=".*features.*"):
         detector.score_samples(wrong_vector)
@@ -282,3 +282,16 @@ def test_precompute_neighbors_modes():
     assert hasattr(detector_memory_efficient, '_training_data_')
     assert hasattr(detector_speed_optimized, '_training_data_')
     assert hasattr(detector_speed_optimized, '_training_data_')
+
+
+def test_check_estimator():
+    check_estimator(
+        RankOD(n_neighbors=5), # So pynndescent works with as few as 10 samples
+        expected_failed_checks = {
+            "check_estimators_pickle": "pynndescent does not pickle nicely",
+            "check_parameters_default_constructible": "We use dicts as params, update to frozen dict when possible",
+            "check_methods_sample_order_invariance": "Pynndescent instability causes problems with random points",
+            "check_methods_subset_invariance": "Pynndescent instability causes problems with random points",
+            "check_fit2d_predict1d": "We auto convert correctly shaped 1d arrays to 2d",
+        },
+    )

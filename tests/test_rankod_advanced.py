@@ -33,11 +33,11 @@ class TestRankODAlgorithm:
         detector.fit(X)
         scores = detector.score_samples(X)
         
-        # Outliers should have higher median score
-        assert np.median(scores[100:]) > np.median(scores[:100])
+        # Outliers should have lower median score
+        assert np.median(scores[100:]) < np.median(scores[:100])
         
         # At least 7/10 outliers should be in top 15 scores
-        top_indices = np.argsort(scores)[-15:]
+        top_indices = np.argsort(scores)[:15]
         n_true_outliers_in_top = np.sum(top_indices >= 100)
         assert n_true_outliers_in_top >= 7
 
@@ -57,7 +57,7 @@ class TestRankODAlgorithm:
         scores = detector.score_samples(X)
         
         # Outliers should have higher scores than cluster points
-        assert scores[150:].mean() > scores[:150].mean()
+        assert scores[150:].mean() < scores[:150].mean()
 
     def test_increasing_outlier_distance(self):
         """Test that more distant outliers get higher scores."""
@@ -274,11 +274,11 @@ class TestRankODScikitLearnCompatibility:
         X = np.random.randn(100, 10)
         
         detector1 = RankOD(n_neighbors=15, max_rank=50, random_state=42)
-        pred1 = detector1.fit_predict(X, contamination=0.1)
+        pred1 = detector1.fit_predict(X)
         
         detector2 = RankOD(n_neighbors=15, max_rank=50, random_state=42)
         detector2.fit(X)
-        pred2 = detector2.predict(X, contamination=0.1)
+        pred2 = detector2.predict(X)
         
         np.testing.assert_array_equal(pred1, pred2)
 
