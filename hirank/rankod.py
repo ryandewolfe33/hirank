@@ -304,29 +304,23 @@ class RankOD(OutlierMixin, BaseEstimator):
             X,
             metric=self.metric,
             metric_kwds=self.metric_kwds,
-            n_neighbors=max(
-                self.n_neighbors + 1, self.max_rank + 1
-            ),  # +1 to exclude self
-            # TODO by taking max are we always storing up to max rank neighbors in the index?
-            # Does this defeat the precompute option
+            n_neighbors=max(self.n_neighbors, self.max_rank) + 1,  # +1 to exclude self
             n_jobs=self.n_jobs,
             random_state=self.random_state,
             verbose=self.verbose,
         )
 
-        # Optionally pre-compute and store training data neighbors for reverse rank computation
+        training_neighbors, training_distances = self.index_.neighbor_graph
+        training_neighbors = training_neighbors[:, 1:] # Exclude self
+        training_distances = training_distances[:, 1:] # Exclude self
+        # Optionally store training data neighbors for reverse rank computation
         if self.precompute_neighbors:
             if self.verbose:
                 print(
                     f"Pre-computing {self.max_rank} nearest neighbors for {n_samples} training samples..."
                 )
-            # TODO can we just read the n_neighbor graph here
-            self._training_neighbors_, self._training_distances_ = self.index_.query(
-                X, k=self.max_rank + 1
-            )
-            # Exclude self (first neighbor)
-            self._training_neighbors_ = self._training_neighbors_[:, 1:]
-            self._training_distances_ = self._training_distances_[:, 1:]
+            self._training_neighbors_ = training_neighbors
+            self._training_distances_ = training_distances
 
         # Store training data for on-demand queries (necessary even though PyNNDescent has _raw_data
         # because it may internally transform the data, causing different query results)
@@ -339,7 +333,12 @@ class RankOD(OutlierMixin, BaseEstimator):
             print("Computing outlier scores...")
 
         # sklearn default is inlier scores
-        self.outlier_scores_ = self._compute_scores(X, is_training=True)
+        self.outlier_scores_ = self._compute_scores(
+            training_neighbors[:, :self.n_neighbors],
+            training_distances[:, :self.n_neighbors],
+            training_distances,
+            is_training=True
+        )
         # Save offset
         self.offset_ = self._compute_offset(self.outlier_scores_)
 
@@ -384,7 +383,8 @@ class RankOD(OutlierMixin, BaseEstimator):
                 return self.outlier_scores_
 
         # For new test data, compute using proper reverse k-NN with distance comparisons
-        outlier_scores = self._compute_scores(X, is_training=False)
+        knn_indices, knn_distances = self.index_.query(X, k=self.n_neighbors)
+        outlier_scores = self._compute_scores(knn_indices, knn_distances, is_training=False)
         return outlier_scores
 
     def decision_function(self, X, contamination: float | None = None):
@@ -471,14 +471,29 @@ class RankOD(OutlierMixin, BaseEstimator):
                 f"Must be 'harmonic', 'inverse_sqrt', 'gaussian', or callable."
             )
 
-    def _compute_scores(self, X: np.ndarray, is_training: bool = False) -> np.ndarray:
+    def _compute_scores(
+        self,
+        knn_indices: np.ndarray,
+        knn_distances: np.ndarray,
+        neighbor_nn_distances: np.ndarray | None = None,
+        is_training: bool = False
+
+    ) -> np.ndarray:
         """
         Compute outlier scores for given data.
 
         Parameters
         ----------
-        X : np.ndarray of shape (n_samples, n_features)
-            Data to score.
+        knn_indices: np.ndarray
+            Each row is a list of indices of the nearest neighbors.
+
+        knn_distances: np.ndarray
+            Each row is a list of distances to the nearest neighbors.
+
+        neighbor_nn_distances: np.ndarray | None = None
+            Each row is a list of distances to the training points nearest neighbors.
+            May not be readily available but can be computed on demand.
+
         is_training : bool, default=False
             Whether X is the training data (allows proper reverse rank computation).
 
@@ -489,25 +504,14 @@ class RankOD(OutlierMixin, BaseEstimator):
 
         """
         kernel_func = self._get_kernel_function()
-
-        # TODO batch for large inputs
-        # TODO better name for knn_indices
         # Get n_neighbors-nearest neighbors for each point from the training index
-        knn_indices, knn_distances = self.index_.query(X, k=self.n_neighbors + 1)
-
-        if is_training:
-            knn_indices = knn_indices[:, 1:]  # Exclude self
-            knn_distances = knn_distances[:, 1:]  # Exclude self
-        else:
-            knn_indices = knn_indices[
-                :, : self.n_neighbors
-            ]  # Take first n_neighbors neighbors
-            knn_distances = knn_distances[
-                :, : self.n_neighbors
-            ]  # Take first n_neighbors neighbors
+        knn_indices = knn_indices[:, :self.n_neighbors]  # Take first n_neighbors neighbors
+        knn_distances = knn_distances[:, :self.n_neighbors]  # Take first n_neighbors neighbors
 
         # Compute the nearest neighbors of the ranked neighbors
-        if hasattr(self, "_training_distances_"):
+        if neighbor_nn_distances is not None:
+            row_map = None
+        elif hasattr(self, "_training_distances_"):
             neighbor_nn_distances = self._training_distances_
             row_map = None
         else:
